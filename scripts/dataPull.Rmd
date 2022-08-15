@@ -1,0 +1,166 @@
+---
+title: "DataDownload"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#INTRODUCTION
+
+This script pulls all California drinking water monitoring data for the previous 5 years from SDWIS and filters for relevant data.
+
+#Resources
+
+Water quality mmonitoring data: https://www.waterboards.ca.gov/drinking_water/certlic/drinkingwater/EDTlibrary.html
+
+
+#Setup
+```{r}
+library(tidyverse)
+library(foreign)
+library(readxl)
+library(vroom) #much faster than readr for csvs
+library(sf) #read shapefiles
+library(rgdal) #read OGR vector maps into spatial objects
+library(magrittr)
+```
+
+# Data Import
+## Chemical Data
+```{r}
+# download, upzip, and read most recent data and chemical storet info
+urls <- c("https://www.waterboards.ca.gov/drinking_water/certlic/drinkingwater/documents/edtlibrary/chemical_as_csv.zip",
+          "https://www.waterboards.ca.gov/drinking_water/certlic/drinkingwater/documents/edtlibrary/storet_as_dbf.zip",
+          'https://www.waterboards.ca.gov/drinking_water/certlic/drinkingwater/documents/edtlibrary/siteloc_as_dbf.zip')
+temp1 <- temp2 <- temp3 <- tempfile()
+
+download.file(urls[1], temp1)
+unzip(temp1, 
+      exdir = "temp")
+
+download.file(urls[2], temp2)
+unzip(temp2,
+      exdir = "temp")
+
+download.file(urls[3], temp3)
+unzip(temp3,
+      exdir = "temp")
+
+rm(temp1, temp2, temp3) # remove temp files
+
+# read chem and storet data into R
+# sometimes, R fails to unzip `chem`. unsure why, but manual download/unzip works
+chem  <- vroom("temp/chemical.csv")
+stor  <- read.dbf("temp/storet.dbf")
+siteloc <- read.dbf("temp/siteloc.dbf")
+
+# SDWIS data updates periodically, breaking the csv in url:
+# https://data.ca.gov/dataset/drinking-water-public-water-system-information
+sdwis <- vroom("https://data.ca.gov/dataset/d6d3beac-6735-4127-9324-4e70f61698d9/resource/9dca2f92-4630-4bee-a9f9-69d2085b57e3/download/drinking-water-watch-public-water-system-facilities.txt")
+
+# make equivalent water system identifers 
+sdwis$`Water System No` <- str_sub(sdwis$`Water System No`, 3, 9)
+chem$PRIM_STA_C <- str_sub(chem$PRIM_STA_C, 1, 7)
+
+# join chem and stor data
+chem <- left_join(chem, stor, by = "STORE_NUM")
+chem <- left_join(chem, sdwis, by = c("PRIM_STA_C" = "Water System No"))
+chem <- chem %>% rename(chemical = CHEMICAL__)
+# write the joined data (optional, takes a while)
+#write_rds(chem, "chem.rds")
+```
+
+### Disply names of unique chemicals
+```{r}
+#get unique names of chemicals for filtering
+unique(chem$chemical) %>% sort()
+```
+
+### Filter for PFAS
+```{r}
+#make list of PFAS and filter
+secondStandards <- c('PH, FIELD',
+                     'TURBIDITY, FIELD',
+                     'TURBIDITY, LABORATORY',
+                     'ZINC',
+                     'TOTAL DISSOLVED SOLIDS',
+                     'TOTAL ORGANIC CARBON (TOC)',
+                     'SULFATE',
+                     'SULFIDE',
+                     'SODIUM',
+                     'SODIUM ABSORPTION RATIO',
+                     'SOURCE TEMPERATURE C',
+                     'PHOSPHATE (AS PO4)',
+                     'PHOSPHATE, ORTHO',
+                     'PH, FIELD',
+                     'PH, LABORATORY',
+                     'NITRATE (AS N)',
+                     'NITRATE (AS NO3)',
+                     'NITRATE + NITRITE (AS N)',
+                     'NITRITE (AS N)',
+                     'MANGANESE',
+                     'MANGANESE, DISSOLVED',
+                     'HYDROGEN SULFIDE',
+                     'HYDROXIDE ALKALINITY',
+                     'HARDNESS (TOTAL) AS CACO3',
+                     'CHLORATE',
+                     'CHLORDANE',
+                     'CHLORIDE',
+                     'CHLORINE DIOXIDE',
+                     'CHLORITE',
+                     'CARBONATE ALKALINITY',
+                     'AGGRSSIVE INDEX (CORROSIVITY)',
+                     'ALKALINITY (TOTAL) AS CACO3'
+                     )
+
+#filter for selected data and delete the rest
+subset <- chem %>% 
+  filter(chemical %in% secondStandards)
+
+#delete the rest
+rm(chem,sdwis, siteloc, stor, pfaslist, urls)
+
+## Write ata to csv ##
+#write.csv(subset, "data/subset.csv")
+```
+
+#Summarize
+```{r}
+## Summarize across water source ##
+summary <- subset %>% 
+    group_by(chemical,
+             RPT_UNIT) %>% 
+  summarize(totalCount = n(),
+            unique_source_count = n_distinct(PRIM_STA_C),
+            min = min(FINDING),
+            percentile_5th = quantile(FINDING, 0.05),
+            median = median(FINDING),
+            percentile_95th = quantile(FINDING, 0.95),
+            max = max(FINDING)
+            )
+
+write.csv(summary,"output/summary.csv")
+
+summary
+```
+## Plot
+```{r}
+boxplot <- subset %>% 
+  mutate(chem.unit = paste0(chemical, " (", RPT_UNIT, ")")) %>% 
+  ggplot(aes(y = chem.unit, x = FINDING)) +
+  geom_boxplot() +
+  scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),
+              labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  theme_minimal(base_size = 15) +
+  theme(axis.title.y = element_blank(),
+        axis.title.x = element_blank())
+#save
+ggsave(boxplot,
+       "output/figures/secStandardboxplot.jpg")
+
+
+#print
+boxplot
+```
+
